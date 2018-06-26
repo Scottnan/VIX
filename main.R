@@ -1,4 +1,3 @@
-
 # VIX指数计算
 library(feather)
 library(WindR)
@@ -40,7 +39,7 @@ select_option = function(Date) {
 
 yield_curve = function(Date, TTM) {
   yield = data.table(read_feather("option_database/yiled_curve.feather"))
-  data = yield_[DATE == Date]
+  data = yield[DATE == Date]
   knots = unlist(c(data[, 2:7]))
   x = c(0/12, 1/12, 3/12, 6/12, 9/12, 12/12)
   dis = abs(x - TTM)

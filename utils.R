@@ -64,9 +64,9 @@ update_option_trade <- function(option_trade, .folder) {
 update_yiled_curve <- function(yield_, .folder) {
 
   path <- paste0(.folder, yiled_curve_name)
-  setkey(yiled_, DATE)
-  stopifnot(GCAMCQT::is_pk_dt(yiled_))
-  GCAMCPUB::writeDtFeather(yiled_, path)
+  setkey(yield_, DATE)
+  stopifnot(GCAMCQT::is_pk_dt(yield_))
+  GCAMCPUB::writeDtFeather(yield_, path)
 }
 
 
