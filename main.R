@@ -1,0 +1,113 @@
+
+# VIX指数计算
+library(feather)
+library(WindR)
+w.start()
+library(data.table)
+library(dplyr)
+library(splines2)
+source('./20180621-Nick-vix/utils.R')
+# 期权信息导入 ---------------------------------------------------------------------------
+# 期权信息表：期权代码、期权名称、行权价格、期权起始日、期权到期日、期权类型
+# 期权交易信息表：期权代码、开、高、低、收、结算价、成交量、成交额
+option_data_folder = "E:/Quant/quant_strategies/20180621-Nick-vix/option_database/"
+update_options(from_to = c(20150209, 20170101), .folder = option_data_folder)
+
+select_option = function(Date) {
+  trade = data.table(read_feather("option_database/option_trade.feather"))
+  info = data.table(read_feather("option_database/option_info.feather"))
+
+  trade = trade[date == Date]
+  info[call_or_put == "认购", call_or_put := "call"]
+  info[call_or_put == "认沽", call_or_put := "put" ]
+  info = info[as.numeric(difftime(expire_date, Date)) > 7]
+  info = info[expire_date <= sort(unique(info$expire_date))[2]]
+  data = merge(info, trade, by.x="wind_code", by.y="option_code", all.x = TRUE)
+  near_term = min(data$expire_date)
+  next_term = max(data$expire_date)
+  near_ = data[expire_date == near_term, .(call_or_put, exercise_price, close)]
+  next_ = data[expire_date == next_term, .(call_or_put, exercise_price, close)]
+  near_ = dcast(near_, exercise_price~call_or_put, value.var = "close", fun.aggregate = mean)
+  next_ = dcast(next_, exercise_price~call_or_put, value.var = "close", fun.aggregate = mean)
+  near_[, diff := abs(call-put)]
+  next_[, diff := abs(call-put)]
+  return(list(NEAR=near_,
+              NEXT=next_,
+              NEAR_TERM=near_term,
+              NEXT_TERM=next_term))
+}
+
+yield_curve = function(Date, TTM) {
+  yield = data.table(read_feather("option_database/yiled_curve.feather"))
+  data = yield_[DATE == Date]
+  knots = unlist(c(data[, 2:7]))
+  x = c(0/12, 1/12, 3/12, 6/12, 9/12, 12/12)
+  dis = abs(x - TTM)
+  or = order(dis)
+  terminal1 = which(or == 1)
+  terminal2 = which(or == 2)
+  dist = dis[terminal1] + dis[terminal2]
+  ra = dis[terminal1] / dist * knots[terminal2] + dis[terminal2] / dist * knots[terminal1]
+  return(log(1 + ra / 100))
+}
+
+cal_ttm = function(Date, ED) {
+  return(as.numeric(difftime(ED, Date))/365 + 9.25/24/365)
+}
+
+cal_delta = function(tbl) {
+  tbl[, diff1 := c(diff(tbl$exercise_price), NA)]
+  tbl[, diff2 := shift(diff1)]
+  tbl[, diff := (diff1 + diff2) / 2]
+  tbl[1, diff := tbl[1, diff1]]
+  tbl[nrow(tbl), diff := tbl[nrow(tbl), diff2]]
+  return(tbl[, .(exercise_price, type, price, diff)])
+}
+
+cal_vix = function(Date) {
+  Date = as.Date(Date)
+  option_info = select_option(Date)
+  t1 = cal_ttm(Date, option_info$NEAR_TERM)
+  t2 = cal_ttm(Date, option_info$NEXT_TERM)
+  r1 = yield_curve(Date, t1)
+  r2 = yield_curve(Date, t2)
+  near_ = na.omit(option_info$NEAR)
+  next_ = na.omit(option_info$NEXT)
+  if(nrow(near_) == 0 | nrow(next_) == 0) return(NA)
+  sp1 = near_[diff == min(diff), exercise_price]
+  sp2 = next_[diff == min(diff), exercise_price]
+  df1 = near_[diff == min(diff), diff]
+  df2 = next_[diff == min(diff), diff]
+  f1 = sp1 + exp(r1 * t1) * df1
+  f2 = sp2 + exp(r2 * t2) * df2
+  k1 = max(near_[exercise_price < f1, exercise_price])
+  k2 = max(next_[exercise_price < f1, exercise_price])
+  # near table
+  near_[exercise_price < k1, `:=` (price = put, type = "PUT")]
+  near_[exercise_price > k1, `:=` (price = call, type = "CALL")]
+  near_[exercise_price == k1, `:=` (price = (put + call) / 2, type = "CALL/PUT AVERAGE")]
+  near_table = cal_delta(near_[, .(exercise_price, type, price)])
+  # next table
+  next_[exercise_price < k2, `:=` (price = put, type = "PUT")]
+  next_[exercise_price > k2, `:=` (price = call, type = "CALL")]
+  next_[exercise_price == k2, `:=` (price = (put + call) / 2, type = "CALL/PUT AVERAGE")]
+  next_table = cal_delta(next_[, .(exercise_price, type, price)])
+
+  near_table[, tmp := (diff /  exercise_price ** 2) * exp(r1 * t1) * price]
+  next_table[, tmp := (diff /  exercise_price ** 2) * exp(r2 * t2) * price]
+  ssigma1 = 2 / t1 * sum(near_table$tmp) - 1 / t1 * (f1 / k1 - 1) ** 2
+  ssigma2 = 2 / t2 * sum(next_table$tmp) - 1 / t2 * (f2 / k2 - 1) ** 2
+
+  d1 = as.numeric(difftime(option_info$NEAR_TERM, Date))
+  d2 = as.numeric(difftime(option_info$NEXT_TERM, Date))
+
+  weighted_sigma = ((t1 * ssigma1) * (d2 - 30) / (d2 - d1) + (t2 * ssigma2) * (30 - d1) / (d2 - d1)) * 365 / 30
+  return(100 * sqrt(weighted_sigma))
+}
+
+date = unique(trade[trade$date > "2015-03-01" & trade$date < "2017-01-01", date])
+vix = data.table(DATE = date,
+                 vix = purrr::map(date, cal_vix))
+
+p <- plot_ly(x = ~vix$DATE, y = ~vix$vix, name = 'trace 0', type = 'scatter', mode = 'lines')
+p
