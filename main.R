@@ -21,8 +21,9 @@ select_option = function(Date) {
   info[call_or_put == "认购", call_or_put := "call"]
   info[call_or_put == "认沽", call_or_put := "put" ]
   info = info[as.numeric(difftime(expire_date, Date)) > 7]
-  info = info[expire_date <= sort(unique(info$expire_date))[2]]
-  data = merge(info, trade, by.x="wind_code", by.y="option_code", all.x = TRUE)
+  # handle the next month issue
+  data = merge(info, trade, by.x="wind_code", by.y="option_code", all.x = TRUE) %>% na.omit()
+  data = data[expire_date <= sort(unique(data$expire_date))[2]]
   near_term = min(data$expire_date)
   next_term = max(data$expire_date)
   near_ = data[expire_date == near_term, .(call_or_put, exercise_price, close)]
@@ -81,7 +82,7 @@ cal_vix = function(Date) {
   f1 = sp1 + exp(r1 * t1) * df1
   f2 = sp2 + exp(r2 * t2) * df2
   k1 = max(near_[exercise_price < f1, exercise_price])
-  k2 = max(next_[exercise_price < f1, exercise_price])
+  k2 = max(next_[exercise_price < f2, exercise_price])
   # near table
   near_[exercise_price < k1, `:=` (price = put, type = "PUT")]
   near_[exercise_price > k1, `:=` (price = call, type = "CALL")]
@@ -103,8 +104,11 @@ cal_vix = function(Date) {
 
   weighted_sigma = ((t1 * ssigma1) * (d2 - 30) / (d2 - d1) + (t2 * ssigma2) * (30 - d1) / (d2 - d1)) * 365 / 30
   return(100 * sqrt(weighted_sigma))
+  #if(is.nan(vix)) return(NA)
+  #else return(vix)
 }
 
+# TODO modify date input
 date = unique(trade[trade$date > "2015-03-01" & trade$date < "2017-01-01", date])
 vix = data.table(DATE = date,
                  vix = purrr::map(date, cal_vix))
